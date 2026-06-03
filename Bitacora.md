@@ -83,7 +83,7 @@ PokeGPT/
 
 | Día | Tarea | Estado |
 |-----|-------|--------|
-| Sem 1 · Lun | Setup: entorno virtual, dependencias PyTorch, estructura de carpetas | [ ] |
+| Sem 1 · Lun | Setup: entorno virtual, dependencias PyTorch, estructura de carpetas | [x] |
 | Sem 1 · Mar | Cargar texto crudo de la Pokédex simplificada, explorar el dataset | [ ] |
 | Sem 1 · Mié | Implementar tokenizador por caracteres: vocab, char2idx, idx2char | [ ] |
 | Sem 1 · Jue | Codificar el dataset completo en tensores de índices | [ ] |
@@ -299,6 +299,25 @@ PokeGPT/
 - `data/raw/`, `data/processed/`, `data/generated/` separados para tener trazabilidad del origen de cada dato
 - Checkpoints ignorados en git (pueden pesar cientos de MB)
 
-**Próxima sesión:** Sem 1 · Lun — Setup completo del entorno virtual y estructura de carpetas (inicio de V0.1)
+**Próxima sesión:** Sem 1 · Mar — Cargar texto crudo de la Pokédex simplificada, explorar el dataset
+
+---
+
+### Sesión 2 — 2026-06-03
+
+**Versión en curso:** V0.1 · Sem 1 · Lun  
+**Tareas completadas:**
+- Entorno virtual creado con Python 3.12.3 en `.venv/`
+- Instaladas dependencias: torch 2.3.1+cpu, numpy 1.26.4, python-dotenv 1.0.1
+- Estructura de carpetas creada: `data/raw/`, `data/processed/`, `data/generated/`, `src/`, `checkpoints/`, `logs/`
+- Creado `setup.ps1` para reproducir el entorno desde cero
+- Creado `verify_setup.py`: todos los checks en verde
+
+**Decisiones tomadas:**
+- Python 3.12.3 en lugar de 3.10 (ambos disponibles en el sistema; 3.12 más moderno y soportado por PyTorch)
+- PyTorch CPU por defecto; se puede cambiar a CUDA editando `requirements.txt` si se dispone de GPU
+- `.gitkeep` en cada carpeta vacía para que git las rastree sin contenido
+
+**Próxima sesión:** Sem 1 · Mar — Cargar texto crudo de la Pokédex simplificada, explorar el dataset
 
 ---

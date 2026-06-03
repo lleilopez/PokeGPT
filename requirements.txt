@@ -1,0 +1,8 @@
+# ─── Dependencias principales ────────────────────────────────────────────────
+# PyTorch (CPU). Para GPU con CUDA visita https://pytorch.org/get-started/locally/
+torch==2.3.1
+torchvision==0.18.1
+
+# ─── Utilidades ───────────────────────────────────────────────────────────────
+python-dotenv==1.0.1     # Cargar variables de entorno desde .env
+numpy==1.26.4            # Operaciones numéricas auxiliares
