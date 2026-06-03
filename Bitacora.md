@@ -84,8 +84,8 @@ PokeGPT/
 | Día | Tarea | Estado |
 |-----|-------|--------|
 | Sem 1 · Lun | Setup: entorno virtual, dependencias PyTorch, estructura de carpetas | [x] |
-| Sem 1 · Mar | Cargar texto crudo de la Pokédex simplificada, explorar el dataset | [ ] |
-| Sem 1 · Mié | Implementar tokenizador por caracteres: vocab, char2idx, idx2char | [ ] |
+| Sem 1 · Mar | Cargar texto crudo de la Pokédex simplificada, explorar el dataset | [x] |
+| Sem 1 · Mié | Implementar tokenizador por caracteres: vocab, char2idx, idx2char | [x] |
 | Sem 1 · Jue | Codificar el dataset completo en tensores de índices | [ ] |
 | Sem 1 · Vie | Revisar tokenización, imprimir ejemplos, confirmar que funciona | [ ] |
 | Sem 1 · Sáb | Implementar capa Embedding desde cero + positional encoding simple | [ ] |
@@ -268,6 +268,40 @@ PokeGPT/
 
 ---
 
+## Componentes del proyecto
+
+> Mapa vivo de los archivos clave: qué hace cada uno, dónde está y cómo encaja.
+> Se actualiza cada vez que se añade o cambia un componente importante.
+
+---
+
+### Datos
+
+| Archivo | Descripción |
+|---------|-------------|
+| `data/raw/pokedex.txt` | Corpus de entrenamiento. 1,025 Pokémon (Gen 1-9), descargados de PokeAPI. Una entrada por línea, separadas por línea en blanco. Formato: nombre, flavor text oficial, stats, habilidades, movimientos — todo en español. 394,879 caracteres, 88 chars únicos. |
+| `data/processed/vocab.json` | Vocabulario del tokenizador serializado en JSON. Contiene `char2idx` (char → índice) y `vocab_size`. Se genera ejecutando `src/tokenizer.py`. |
+
+### Scripts de utilidad
+
+| Archivo | Descripción |
+|---------|-------------|
+| `scripts/fetch_pokedex.py` | Descarga los datos de PokeAPI y genera `data/raw/pokedex.txt`. Solo se necesita ejecutar una vez (o para regenerar el corpus). |
+| `src/explore_dataset.py` | Carga el corpus y muestra estadísticas: caracteres, vocab, frecuencias, secuencias posibles. Útil para inspeccionar el dataset antes de entrenar. |
+| `verify_setup.py` | Comprueba que el entorno virtual, PyTorch y la estructura de carpetas están correctamente configurados. |
+
+### Modelo (en construcción)
+
+| Archivo | Descripción |
+|---------|-------------|
+| `src/tokenizer.py` | Tokenizador por caracteres. Construye vocab desde el corpus, encode/decode texto↔índices, guarda/carga vocab en JSON. Clase: `CharTokenizer`. |
+| `src/dataset.py` | *(pendiente V0.1)* Dataset y DataLoader: divide el corpus en secuencias de entrenamiento con ventana deslizante. |
+| `src/model.py` | *(pendiente V0.1)* Transformer Decoder completo: Embedding, Positional Encoding, Multi-Head Attention, Feed-Forward, capas residuales. |
+| `src/train.py` | *(pendiente V0.1)* Bucle de entrenamiento: forward pass, cálculo de loss, backpropagation, guardado de checkpoints. |
+| `src/generate.py` | *(pendiente V0.1)* Generación de texto: greedy decoding y sampling con temperatura. |
+
+---
+
 ## Decisiones técnicas
 
 > Se irán añadiendo a medida que se tomen durante el desarrollo.
@@ -299,7 +333,7 @@ PokeGPT/
 - `data/raw/`, `data/processed/`, `data/generated/` separados para tener trazabilidad del origen de cada dato
 - Checkpoints ignorados en git (pueden pesar cientos de MB)
 
-**Próxima sesión:** Sem 1 · Mar — Cargar texto crudo de la Pokédex simplificada, explorar el dataset
+**Próxima sesión:** Sem 1 · Mar — Cargar texto crudo, explorar dataset
 
 ---
 
@@ -318,6 +352,42 @@ PokeGPT/
 - PyTorch CPU por defecto; se puede cambiar a CUDA editando `requirements.txt` si se dispone de GPU
 - `.gitkeep` en cada carpeta vacía para que git las rastree sin contenido
 
-**Próxima sesión:** Sem 1 · Mar — Cargar texto crudo de la Pokédex simplificada, explorar el dataset
+**Próxima sesión:** Sem 1 · Jue — Codificar el dataset completo en tensores de índices
+
+---
+
+### Sesión 3 — 2026-06-03
+
+**Versión en curso:** V0.1 · Sem 1 · Mar  
+**Tareas completadas:**
+- Descargados los 1,025 Pokémon (Gen 1-9) desde PokeAPI con `scripts/fetch_pokedex.py`
+- Texto en español: nombre, tipos, flavor text oficial, stats, habilidades, movimientos
+- Exploración del corpus con `src/explore_dataset.py`: 394,879 caracteres, 88 chars únicos, ~395K secuencias posibles
+
+**Decisiones tomadas:**
+- Usar PokeAPI (API de datos pública, no de IA) en lugar de texto escrito a mano — datos reales y completos
+- Extender de Gen 1 (151) a todas las generaciones (1,025) para tener más corpus de entrenamiento
+- El vocabulario incluye `♀`, `♂` y acentos españoles — se incluyen tal cual en el vocab del tokenizador
+
+**Próxima sesión:** Sem 1 · Jue — Codificar el dataset completo en tensores de índices
+
+---
+
+### Sesión 4 — 2026-06-03
+
+**Versión en curso:** V0.1 · Sem 1 · Mié  
+**Tareas completadas:**
+- Implementado `src/tokenizer.py`: clase `CharTokenizer` con `build_vocab`, `encode`, `decode`, `save`, `load`
+- Vocabulario: 89 tokens (índice 0 = `<UNK>`, índices 1-88 = caracteres del corpus)
+- Round-trip OK: encode → decode reproduce el texto original sin pérdida
+- Caracteres fuera del vocab mapeados a `<UNK>` sin errores
+- Vocab guardado en `data/processed/vocab.json`
+
+**Decisiones tomadas:**
+- Índice 0 reservado para `<UNK>` desde el principio — evita reorganizar el vocab al añadirlo después
+- `sorted(set(texto))` garantiza vocab determinista: mismo corpus → mismo vocab siempre
+- Se guarda solo `char2idx` en JSON; `idx2char` se reconstruye al cargar (es el inverso)
+
+**Próxima sesión:** Sem 1 · Jue — Codificar el dataset completo en tensores de índices
 
 ---
