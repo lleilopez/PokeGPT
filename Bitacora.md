@@ -86,8 +86,8 @@ PokeGPT/
 | Sem 1 · Lun | Setup: entorno virtual, dependencias PyTorch, estructura de carpetas | [x] |
 | Sem 1 · Mar | Cargar texto crudo de la Pokédex simplificada, explorar el dataset | [x] |
 | Sem 1 · Mié | Implementar tokenizador por caracteres: vocab, char2idx, idx2char | [x] |
-| Sem 1 · Jue | Codificar el dataset completo en tensores de índices | [ ] |
-| Sem 1 · Vie | Revisar tokenización, imprimir ejemplos, confirmar que funciona | [ ] |
+| Sem 1 · Jue | Codificar el dataset completo en tensores de índices | [x] |
+| Sem 1 · Vie | Revisar tokenización, imprimir ejemplos, confirmar que funciona | [x] |
 | Sem 1 · Sáb | Implementar capa Embedding desde cero + positional encoding simple | [ ] |
 | Sem 1 · Dom | Implementar bloque de atención: Q, K, V, scaled dot-product | [ ] |
 | Sem 2 · Lun | Implementar Multi-Head Attention combinando varios bloques | [ ] |
@@ -295,7 +295,7 @@ PokeGPT/
 | Archivo | Descripción |
 |---------|-------------|
 | `src/tokenizer.py` | Tokenizador por caracteres. Construye vocab desde el corpus, encode/decode texto↔índices, guarda/carga vocab en JSON. Clase: `CharTokenizer`. |
-| `src/dataset.py` | *(pendiente V0.1)* Dataset y DataLoader: divide el corpus en secuencias de entrenamiento con ventana deslizante. |
+| `src/dataset.py` | Dataset y DataLoader. Carga el corpus como LongTensor 1D, genera pares `(input, target)` con ventana deslizante de `context_length` tokens. Split 90/10 cronológico. Clases: `PokeDataset`, `crear_dataloaders`. |
 | `src/model.py` | *(pendiente V0.1)* Transformer Decoder completo: Embedding, Positional Encoding, Multi-Head Attention, Feed-Forward, capas residuales. |
 | `src/train.py` | *(pendiente V0.1)* Bucle de entrenamiento: forward pass, cálculo de loss, backpropagation, guardado de checkpoints. |
 | `src/generate.py` | *(pendiente V0.1)* Generación de texto: greedy decoding y sampling con temperatura. |
@@ -369,7 +369,27 @@ PokeGPT/
 - Extender de Gen 1 (151) a todas las generaciones (1,025) para tener más corpus de entrenamiento
 - El vocabulario incluye `♀`, `♂` y acentos españoles — se incluyen tal cual en el vocab del tokenizador
 
-**Próxima sesión:** Sem 1 · Jue — Codificar el dataset completo en tensores de índices
+**Próxima sesión:** Sem 1 · Sáb — Implementar capa Embedding + positional encoding
+
+---
+
+### Sesión 5 — 2026-06-03
+
+**Versión en curso:** V0.1 · Sem 1 · Jue + Vie  
+**Tareas completadas:**
+- Implementado `src/dataset.py`: clase `PokeDataset` + función `crear_dataloaders`
+- Corpus completo tokenizado en LongTensor 1D de shape `(394879,)`, dtype `torch.int64`
+- Ventana deslizante: pares `(input, target)` de shape `(128,)`, target = input desplazado 1
+- Split 90/10 cronológico: 11,102 batches de train, 1,229 de validación
+- Batch shape verificado: `(32, 128)` — listo para conectar con el modelo
+- Token mínimo = 1 (ningún `<UNK>` en el corpus de entrenamiento)
+
+**Decisiones tomadas:**
+- Split cronológico (no aleatorio): el 10% final es siempre validación — el modelo nunca ve esos tokens en entrenamiento
+- `drop_last=True`: todos los batches tienen exactamente `batch_size` secuencias
+- Un solo LongTensor 1D para todo el corpus — eficiente en memoria, los slices no copian datos hasta que PyTorch los necesita
+
+**Próxima sesión:** Sem 1 · Sáb — Implementar capa Embedding + positional encoding
 
 ---
 
