@@ -4,7 +4,7 @@ model.py — Transformer Decoder de PokeGPT, construido desde cero.
 Este archivo se construye de forma incremental a lo largo de la Semana 1-2:
     Sáb  — TokenEmbedding + PositionalEncoding        [HECHO]
     Dom  — SelfAttention (Q, K, V, scaled dot-product) [HECHO]
-    Lun  — MultiHeadAttention
+    Lun  — MultiHeadAttention                              [HECHO]
     Mar  — FeedForward + residual + LayerNorm
     Mié  — DecoderBlock + PokeGPTModel completo
 
@@ -394,6 +394,140 @@ class SelfAttention(nn.Module):
         return self.W_o(attn_output)
 
 
+# ─── 6. MULTI-HEAD ATTENTION ─────────────────────────────────────────────────
+
+class MultiHeadAttention(nn.Module):
+    """
+    Atención multi-cabeza: ejecuta varias atenciones en paralelo y combina resultados.
+
+    ¿Por qué múltiples cabezas?
+        Una sola cabeza de atención aprende UNA forma de relacionar tokens entre sí.
+        Con varias cabezas, el modelo puede aprender SIMULTÁNEAMENTE distintos tipos
+        de relaciones en la misma secuencia.
+
+        Ejemplo en un texto de Pokémon:
+            Cabeza 1 → aprende relaciones de tipo ("Planta" ↔ "Veneno")
+            Cabeza 2 → aprende relaciones de stats ("HP alto" ↔ "defensor")
+            Cabeza 3 → aprende relaciones posicionales (sujeto ↔ verbo)
+            Cabeza 4 → aprende relaciones de movimientos (ataque ↔ cobertura)
+
+        Ninguna cabeza ve la información completa: cada una trabaja con un
+        subespacio de dimensión embed_dim / num_heads. Al final se concatenan
+        y se proyectan de vuelta a embed_dim.
+
+    ¿Cómo se implementa sin bucles?
+        En lugar de crear num_heads objetos SelfAttention separados, hacemos
+        una sola operación matricial y luego reordenamos las dimensiones.
+
+        El truco está en el reshape: si embed_dim=128 y num_heads=4,
+        cada cabeza trabaja con d_head = 128/4 = 32 dimensiones.
+
+        Reshape de (batch, seq, embed_dim) → (batch, num_heads, seq, d_head)
+        Así PyTorch aplica la atención en paralelo sobre las num_heads cabezas.
+
+    Flujo completo:
+        x (batch, seq, embed_dim)
+        → proyectar W_q, W_k, W_v  → (batch, seq, embed_dim)
+        → split en cabezas          → (batch, num_heads, seq, d_head)
+        → scaled dot-product attn   → (batch, num_heads, seq, d_head)
+        → concatenar cabezas        → (batch, seq, embed_dim)
+        → proyección final W_o      → (batch, seq, embed_dim)
+
+    Args:
+        embed_dim:  dimensión total de los embeddings. Debe ser divisible por num_heads.
+        num_heads:  número de cabezas de atención.
+        dropout:    dropout aplicado sobre los pesos de atención.
+    """
+
+    def __init__(self, embed_dim: int, num_heads: int, dropout: float = 0.1):
+        super().__init__()
+
+        assert embed_dim % num_heads == 0, (
+            f"embed_dim ({embed_dim}) debe ser divisible por num_heads ({num_heads})"
+        )
+
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.d_head    = embed_dim // num_heads   # dimensión por cabeza
+
+        # Una sola proyección grande para Q, K y V.
+        # Es matemáticamente equivalente a tener num_heads proyecciones pequeñas,
+        # pero más eficiente porque es una sola operación matricial.
+        self.W_q = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.W_k = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.W_v = nn.Linear(embed_dim, embed_dim, bias=False)
+
+        # Proyección final: combina las salidas de todas las cabezas
+        self.W_o = nn.Linear(embed_dim, embed_dim, bias=False)
+
+        self.dropout = nn.Dropout(dropout)
+
+    def _split_heads(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Divide el tensor en num_heads cabezas reordenando dimensiones.
+
+        Transforma (batch, seq_len, embed_dim)
+                 → (batch, num_heads, seq_len, d_head)
+
+        Cada cabeza recibe una "rodaja" de d_head dimensiones del embedding.
+        """
+        batch, seq_len, _ = x.shape
+        # Reshape: (batch, seq, embed) → (batch, seq, num_heads, d_head)
+        x = x.view(batch, seq_len, self.num_heads, self.d_head)
+        # Transponer: (batch, seq, num_heads, d_head) → (batch, num_heads, seq, d_head)
+        # Necesario para que la atención opere sobre la dimensión seq correctamente
+        return x.transpose(1, 2)
+
+    def _merge_heads(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Operación inversa a _split_heads: reúne las cabezas en un solo tensor.
+
+        Transforma (batch, num_heads, seq_len, d_head)
+                 → (batch, seq_len, embed_dim)
+        """
+        batch, _, seq_len, _ = x.shape
+        # Deshacer la transposición y volver a fusionar las dimensiones de cabeza
+        x = x.transpose(1, 2).contiguous()
+        return x.view(batch, seq_len, self.embed_dim)
+
+    def forward(
+        self,
+        x:    torch.Tensor,
+        mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """
+        Args:
+            x:    (batch, seq_len, embed_dim)
+            mask: máscara causal (1, seq_len, seq_len) o None
+
+        Returns:
+            (batch, seq_len, embed_dim)
+        """
+        # 1. Proyectar a Q, K, V — shape: (batch, seq_len, embed_dim)
+        q = self.W_q(x)
+        k = self.W_k(x)
+        v = self.W_v(x)
+
+        # 2. Dividir en cabezas — shape: (batch, num_heads, seq_len, d_head)
+        q = self._split_heads(q)
+        k = self._split_heads(k)
+        v = self._split_heads(v)
+
+        # 3. Atención en paralelo sobre todas las cabezas
+        # La máscara necesita una dimensión extra para num_heads: (1, 1, seq, seq)
+        if mask is not None:
+            mask = mask.unsqueeze(1)   # (1, seq, seq) → (1, 1, seq, seq)
+
+        attn_out, self.attn_weights = scaled_dot_product_attention(q, k, v, mask)
+        # attn_out shape: (batch, num_heads, seq_len, d_head)
+
+        # 4. Reunir cabezas — shape: (batch, seq_len, embed_dim)
+        attn_out = self._merge_heads(attn_out)
+
+        # 5. Proyección final + dropout
+        return self.W_o(self.dropout(attn_out))
+
+
 # ─── Script de prueba ─────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -510,4 +644,41 @@ if __name__ == "__main__":
     print(f"  (4 matrices lineales de {EMBED_DIM}x{EMBED_DIM}: W_q, W_k, W_v, W_o)")
 
     print("\n[OK] SelfAttention lista.")
+
+    # ── MultiHeadAttention ───────────────────────────────────────────────────
+    print("\n--- MultiHeadAttention ---")
+    NUM_HEADS = int(os.getenv("NUM_HEADS", 4))
+    D_HEAD    = EMBED_DIM // NUM_HEADS
+
+    mha = MultiHeadAttention(EMBED_DIM, NUM_HEADS, dropout=0.0)
+    mha.eval()
+
+    mask_demo2 = crear_mascara_causal(SEQ_LEN, device=torch.device("cpu"))
+    salida_mha = mha(x_demo, mask=mask_demo2)
+
+    print(f"  num_heads : {NUM_HEADS}")
+    print(f"  d_head    : {D_HEAD}  (embed_dim {EMBED_DIM} / num_heads {NUM_HEADS})")
+    print(f"  Entrada shape      : {x_demo.shape}")
+    print(f"  Salida shape       : {salida_mha.shape}  (misma que la entrada)")
+    print(f"  attn_weights shape : {mha.attn_weights.shape}  → (batch=4, heads={NUM_HEADS}, seq={SEQ_LEN}, seq={SEQ_LEN})")
+
+    # Verificar máscara en cada cabeza
+    print(f"\n  Pesos token 0, cabeza 0: {[round(p,4) for p in mha.attn_weights[0,0,0].tolist()]}")
+    print(f"  Pesos token 0, cabeza 1: {[round(p,4) for p in mha.attn_weights[0,1,0].tolist()]}")
+    print(f"  (Token 0 tiene peso 1.0 en posición 0 en todas las cabezas)")
+
+    print(f"\n  Pesos token 3, cabeza 0: {[round(p,4) for p in mha.attn_weights[0,0,3].tolist()]}")
+    print(f"  Pesos token 3, cabeza 1: {[round(p,4) for p in mha.attn_weights[0,1,3].tolist()]}")
+    print(f"  (Cada cabeza distribuye la atención de forma distinta sobre tokens 0-3)")
+
+    params_mha = sum(p.numel() for p in mha.parameters())
+    print(f"\n  Parámetros aprendibles : {params_mha:,}")
+    print(f"  Mismos que SelfAttention: 4 matrices {EMBED_DIM}x{EMBED_DIM}")
+    print(f"  La diferencia es cómo se usan: {NUM_HEADS} cabezas de {D_HEAD} dims cada una")
+
+    # Comparar: SelfAttention vs MultiHeadAttention tienen mismos params
+    assert params_mha == params_attn, "Deben tener los mismos parámetros"
+    print(f"  SelfAttention params == MultiHeadAttention params: {params_mha == params_attn}")
+
+    print("\n[OK] MultiHeadAttention lista.")
     print("=" * 55)
