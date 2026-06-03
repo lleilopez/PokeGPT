@@ -2,8 +2,8 @@
 model.py — Transformer Decoder de PokeGPT, construido desde cero.
 
 Este archivo se construye de forma incremental a lo largo de la Semana 1-2:
-    Sáb  — TokenEmbedding + PositionalEncoding        (este archivo, hoy)
-    Dom  — SelfAttention (Q, K, V, scaled dot-product)
+    Sáb  — TokenEmbedding + PositionalEncoding        [HECHO]
+    Dom  — SelfAttention (Q, K, V, scaled dot-product) [HECHO]
     Lun  — MultiHeadAttention
     Mar  — FeedForward + residual + LayerNorm
     Mié  — DecoderBlock + PokeGPTModel completo
@@ -217,6 +217,183 @@ class InputEmbedding(nn.Module):
         return self.pos_enc(tokens)
 
 
+# ─── 4. SCALED DOT-PRODUCT ATTENTION ─────────────────────────────────────────
+
+def scaled_dot_product_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    mask: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    La operación fundamental de atención del Transformer.
+
+    Intuición: imagina que cada token de la secuencia hace una "pregunta" (Query)
+    y todos los tokens ofrecen una "clave" (Key). La similitud entre la pregunta
+    y cada clave determina cuánta "atención" se le presta a cada token. El
+    resultado es una suma ponderada de los "valores" (Value) de todos los tokens.
+
+    En un modelo de lenguaje:
+        Q = "¿qué información necesito para predecir el siguiente token?"
+        K = "¿qué información tengo yo para ofrecer?"
+        V = "esta es la información que ofrezco si me seleccionan"
+
+    Fórmula (Vaswani et al., 2017):
+        Attention(Q, K, V) = softmax( Q·K^T / sqrt(d_k) ) · V
+
+    ¿Por qué dividir por sqrt(d_k)?
+        El producto punto Q·K^T crece en magnitud con d_k (dimensión de las claves).
+        Con valores muy grandes, la softmax se satura: un valor domina con ~1.0 y
+        los demás caen a ~0.0. El gradiente se vuelve casi cero y el modelo deja
+        de aprender. Dividir por sqrt(d_k) mantiene la varianza estable.
+
+    ¿Por qué necesitamos mask (máscara causal)?
+        En un modelo autoregresivo, el token en la posición i solo puede ver los
+        tokens 0..i-1. Si no enmascaramos, el token en posición 3 "vería" el
+        token en posición 4, que es justamente lo que tiene que predecir.
+        Sería como hacer un examen con las respuestas delante.
+
+        La máscara añade -inf a las posiciones futuras ANTES de softmax.
+        softmax(-inf) = 0, así que esas posiciones reciben atención cero.
+
+        Visualmente para una secuencia de longitud 4:
+            posición → puede ver:
+            0        → [0]           (solo se ve a sí misma)
+            1        → [0, 1]
+            2        → [0, 1, 2]
+            3        → [0, 1, 2, 3]
+
+    Args:
+        q:    Queries,  shape (..., seq_len, d_k)
+        k:    Keys,     shape (..., seq_len, d_k)
+        v:    Values,   shape (..., seq_len, d_v)
+        mask: máscara booleana o de floats, shape (..., seq_len, seq_len).
+              Las posiciones con True (o -inf) se enmascaran.
+
+    Returns:
+        output:  tensor ponderado, shape (..., seq_len, d_v)
+        weights: pesos de atención tras softmax, shape (..., seq_len, seq_len)
+                 útil para visualizar qué tokens se atienden entre sí.
+    """
+    d_k = q.size(-1)   # dimensión de las claves
+
+    # Paso 1: similitud entre queries y keys → scores (..., seq_len, seq_len)
+    # scores[i, j] = cuánto se parece la query del token i a la key del token j
+    scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(d_k)
+
+    # Paso 2: aplicar máscara causal (si existe)
+    # Rellenamos con un valor muy negativo las posiciones futuras
+    if mask is not None:
+        scores = scores.masked_fill(mask, float("-inf"))
+
+    # Paso 3: softmax sobre la última dimensión → pesos que suman 1 por fila
+    # Cada token distribuye el 100% de su atención entre los tokens permitidos
+    weights = torch.softmax(scores, dim=-1)
+
+    # Paso 4: suma ponderada de values
+    output = torch.matmul(weights, v)
+
+    return output, weights
+
+
+def crear_mascara_causal(seq_len: int, device: torch.device) -> torch.Tensor:
+    """
+    Construye la máscara causal (triangular superior) para el decoder.
+
+    Devuelve un tensor booleano donde True indica "esta posición debe ser
+    enmascarada" (no puede ser atendida porque está en el futuro).
+
+    Ejemplo para seq_len=4:
+        [[False, True,  True,  True ],
+         [False, False, True,  True ],
+         [False, False, False, True ],
+         [False, False, False, False]]
+
+    Args:
+        seq_len: longitud de la secuencia.
+        device:  dispositivo donde crear el tensor (cpu o cuda).
+
+    Returns:
+        Tensor booleano de forma (1, seq_len, seq_len).
+    """
+    # torch.ones crea una matriz de unos, triu extrae el triángulo superior
+    # diagonal=1 excluye la diagonal principal (un token SÍ puede atenderse a sí mismo)
+    mask = torch.triu(torch.ones(seq_len, seq_len, device=device), diagonal=1).bool()
+    return mask.unsqueeze(0)   # añadimos dimensión de batch: (1, seq, seq)
+
+
+# ─── 5. SELF-ATTENTION (una sola cabeza) ──────────────────────────────────────
+
+class SelfAttention(nn.Module):
+    """
+    Bloque de auto-atención de una sola cabeza.
+
+    "Auto" significa que Q, K y V se generan todos a partir de la misma
+    entrada x. El bloque aprende a relacionar cada token con los demás
+    tokens de la misma secuencia.
+
+    Proceso:
+        1. Proyectar x → Q, K, V mediante tres capas lineales independientes.
+           Cada proyección puede aprender a "extraer" distintos aspectos del token.
+        2. Aplicar scaled dot-product attention con máscara causal.
+        3. Proyectar la salida de vuelta a embed_dim (proyección de salida).
+
+    ¿Por qué proyecciones lineales y no usar x directamente como Q, K, V?
+        Si usáramos x directamente, Q = K = V = x, y la atención aprendería
+        una sola "forma de relacionarse". Las proyecciones dan al modelo la
+        libertad de aprender representaciones diferentes para preguntar (Q),
+        para ofrecer claves (K) y para ofrecer valores (V).
+
+    Args:
+        embed_dim: dimensión de los vectores de entrada y salida.
+        dropout:   dropout aplicado sobre los pesos de atención.
+    """
+
+    def __init__(self, embed_dim: int, dropout: float = 0.1):
+        super().__init__()
+
+        self.embed_dim = embed_dim
+
+        # Tres proyecciones lineales: una para Q, otra para K, otra para V.
+        # bias=False es común en implementaciones modernas de atención.
+        self.W_q = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.W_k = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.W_v = nn.Linear(embed_dim, embed_dim, bias=False)
+
+        # Proyección de salida: combina la información de atención
+        self.W_o = nn.Linear(embed_dim, embed_dim, bias=False)
+
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(
+        self,
+        x:    torch.Tensor,
+        mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """
+        Args:
+            x:    embeddings de entrada, shape (batch, seq_len, embed_dim).
+            mask: máscara causal, shape (1, seq_len, seq_len) o None.
+
+        Returns:
+            tensor de la misma shape que x: (batch, seq_len, embed_dim).
+        """
+        # Proyectar x a Q, K, V — cada uno tiene shape (batch, seq_len, embed_dim)
+        q = self.W_q(x)
+        k = self.W_k(x)
+        v = self.W_v(x)
+
+        # Aplicar la atención con máscara causal
+        attn_output, self.attn_weights = scaled_dot_product_attention(q, k, v, mask)
+
+        # Guardamos attn_weights como atributo para poder inspeccionarlos
+        # externamente si queremos visualizar qué tokens se atienden.
+
+        # Aplicar dropout sobre la salida y proyectar al espacio original
+        attn_output = self.dropout(attn_output)
+        return self.W_o(attn_output)
+
+
 # ─── Script de prueba ─────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -290,4 +467,47 @@ if __name__ == "__main__":
     print(f"  (El PositionalEncoding NO tiene parametros — es fijo)")
 
     print("\n[OK] Embedding y Positional Encoding listos.")
+
+    # ── Máscara causal ───────────────────────────────────────────────────────
+    print("\n--- Máscara causal (seq_len=6) ---")
+    mask = crear_mascara_causal(6, device=torch.device("cpu"))
+    print(f"  Shape: {mask.shape}")
+    print("  Matriz (True = posición enmascarada = futuro):")
+    for fila in mask[0]:
+        print("    " + "  ".join(["T" if v else "." for v in fila.tolist()]))
+    print("  (. = puede ver este token, T = no puede — está en el futuro)")
+
+    # ── SelfAttention ────────────────────────────────────────────────────────
+    print("\n--- SelfAttention (una cabeza) ---")
+    SEQ_LEN = 16
+
+    # Simulamos la salida del InputEmbedding: (batch=4, seq=16, embed=128)
+    x_demo  = input_emb(indices_demo)
+    mask_demo = crear_mascara_causal(SEQ_LEN, device=torch.device("cpu"))
+
+    attn = SelfAttention(EMBED_DIM, dropout=0.0)
+    attn.eval()
+    salida_attn = attn(x_demo, mask=mask_demo)
+
+    print(f"  Entrada shape : {x_demo.shape}")
+    print(f"  Salida shape  : {salida_attn.shape}  (misma shape que la entrada)")
+    print(f"  Pesos de atención shape: {attn.attn_weights.shape}  → (batch=4, seq={SEQ_LEN}, seq={SEQ_LEN})")
+
+    # Verificar que la máscara funciona: los pesos del futuro deben ser 0
+    # En la fila 0 (primer token), solo la posición 0 puede tener peso > 0
+    pesos_fila0 = attn.attn_weights[0, 0]   # pesos del token 0 en la secuencia 0
+    print(f"\n  Pesos de atención del token 0 (solo puede verse a sí mismo):")
+    print(f"    {[round(p, 4) for p in pesos_fila0.tolist()]}")
+    print(f"    (el token 0 tiene peso 1.0 en posición 0 y 0.0 en el resto)")
+
+    pesos_fila3 = attn.attn_weights[0, 3]   # pesos del token 3
+    print(f"\n  Pesos de atención del token 3 (puede ver tokens 0,1,2,3):")
+    print(f"    {[round(p, 4) for p in pesos_fila3.tolist()]}")
+    print(f"    (los 4 primeros suman 1.0, el resto son 0.0)")
+
+    params_attn = sum(p.numel() for p in attn.parameters())
+    print(f"\n  Parámetros aprendibles: {params_attn:,}")
+    print(f"  (4 matrices lineales de {EMBED_DIM}x{EMBED_DIM}: W_q, W_k, W_v, W_o)")
+
+    print("\n[OK] SelfAttention lista.")
     print("=" * 55)
