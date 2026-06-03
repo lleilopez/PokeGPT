@@ -5,7 +5,7 @@ Este archivo se construye de forma incremental a lo largo de la Semana 1-2:
     Sáb  — TokenEmbedding + PositionalEncoding        [HECHO]
     Dom  — SelfAttention (Q, K, V, scaled dot-product) [HECHO]
     Lun  — MultiHeadAttention                              [HECHO]
-    Mar  — FeedForward + residual + LayerNorm
+    Mar  — FeedForward + residual + LayerNorm              [HECHO]
     Mié  — DecoderBlock + PokeGPTModel completo
 
 ¿Por qué necesitamos Embedding + Positional Encoding?
@@ -528,6 +528,137 @@ class MultiHeadAttention(nn.Module):
         return self.W_o(self.dropout(attn_out))
 
 
+# ─── 7. FEED-FORWARD ─────────────────────────────────────────────────────────
+
+class FeedForward(nn.Module):
+    """
+    Red feed-forward aplicada posición a posición tras la atención.
+
+    ¿Qué hace y por qué existe?
+        La atención mezcla información entre tokens (comunicación entre posiciones).
+        El FeedForward procesa cada token de forma independiente (sin mirar a los
+        vecinos), permitiendo al modelo hacer transformaciones más complejas sobre
+        la representación de cada token individualmente.
+
+        Se puede pensar como: la atención decide QUÉ información recoger de otros
+        tokens; el FeedForward decide QUÉ HACER con esa información una vez recogida.
+
+    Arquitectura: dos capas lineales con expansión intermedia
+        Linear(embed_dim → 4 * embed_dim)  — proyección a espacio mayor
+        GELU()                              — activación no lineal
+        Dropout
+        Linear(4 * embed_dim → embed_dim)  — proyección de vuelta
+        Dropout
+
+    ¿Por qué expandir a 4 * embed_dim?
+        El factor 4 viene del paper original (Vaswani et al., 2017) y ha demostrado
+        funcionar bien empíricamente. El espacio mayor permite representar
+        combinaciones más complejas antes de comprimir de vuelta.
+        Con embed_dim=128: 128 → 512 → 128.
+
+    ¿Por qué GELU en vez de ReLU?
+        GELU (Gaussian Error Linear Unit) es la activación estándar en LLMs modernos
+        (GPT-2, GPT-3, BERT). Es similar a ReLU pero suave en torno al 0,
+        lo que estabiliza los gradientes y suele dar mejores resultados en lenguaje.
+
+    Args:
+        embed_dim:  dimensión de entrada y salida.
+        ff_dim:     dimensión de la capa intermedia (por defecto 4 * embed_dim).
+        dropout:    dropout aplicado tras cada capa lineal.
+    """
+
+    def __init__(self, embed_dim: int, ff_dim: int | None = None, dropout: float = 0.1):
+        super().__init__()
+
+        if ff_dim is None:
+            ff_dim = 4 * embed_dim   # expansión estándar del paper original
+
+        self.net = nn.Sequential(
+            nn.Linear(embed_dim, ff_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(ff_dim, embed_dim),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: (batch, seq_len, embed_dim)
+        Returns:
+            (batch, seq_len, embed_dim) — misma shape, cada token transformado
+        """
+        return self.net(x)
+
+
+# ─── 8. RESIDUAL CONNECTION + LAYER NORM ─────────────────────────────────────
+
+class ResidualBlock(nn.Module):
+    """
+    Envuelve cualquier sub-capa añadiendo conexión residual y Layer Normalization.
+
+    Estos dos mecanismos son esenciales para entrenar redes profundas con éxito.
+
+    CONEXIÓN RESIDUAL (skip connection):
+        En lugar de aprender output = F(x), aprendemos output = x + F(x).
+        Esto significa que F(x) solo necesita aprender la DIFERENCIA respecto
+        a la entrada — lo que "falta" o "hay que corregir".
+
+        Ventaja crítica: el gradiente puede fluir directamente desde la salida
+        hasta la entrada sin pasar por F. En redes de muchas capas, sin residual
+        el gradiente se multiplica muchas veces y tiende a desvanecerse (vanishing
+        gradient). La conexión residual crea un "camino de autopista" para el gradiente.
+
+    LAYER NORMALIZATION:
+        Normaliza los valores de cada token individualmente (no por batch).
+        Para cada token calcula media y varianza sobre sus embed_dim valores
+        y normaliza: x̂ = (x - media) / sqrt(varianza + epsilon).
+        Luego aplica parámetros aprendibles gamma (escala) y beta (sesgo).
+
+        ¿Por qué no Batch Normalization?
+            BatchNorm normaliza por batch — depende de tener batches grandes y
+            se comporta diferente en train vs inference. Para secuencias de longitud
+            variable y texto, LayerNorm es más estable y predecible.
+
+    ORDEN PRE-NORM (usado aquí):
+        output = x + SubCapa(LayerNorm(x))
+
+        El paper original usaba Post-Norm: LayerNorm(x + SubCapa(x))
+        Los LLMs modernos (GPT-2 en adelante) usan Pre-Norm porque es más
+        estable durante el entrenamiento, especialmente con muchas capas.
+
+    Args:
+        embed_dim: dimensión de los embeddings (para LayerNorm).
+        subcapa:   el módulo a envolver (MultiHeadAttention o FeedForward).
+        dropout:   dropout adicional sobre la salida de la subcapa.
+    """
+
+    def __init__(self, embed_dim: int, subcapa: nn.Module, dropout: float = 0.1):
+        super().__init__()
+        self.norm    = nn.LayerNorm(embed_dim)
+        self.subcapa = subcapa
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+        """
+        Aplica Pre-Norm + subcapa + conexión residual.
+
+        **kwargs permite pasar argumentos extra a la subcapa (por ejemplo mask
+        para MultiHeadAttention) sin que ResidualBlock necesite conocerlos.
+
+        Args:
+            x: (batch, seq_len, embed_dim)
+        Returns:
+            (batch, seq_len, embed_dim)
+        """
+        # Pre-Norm: normalizar antes de pasar por la subcapa
+        normed = self.norm(x)
+        # Aplicar subcapa (atención o feed-forward)
+        out    = self.subcapa(normed, **kwargs)
+        # Conexión residual: sumar la entrada original
+        return x + self.dropout(out)
+
+
 # ─── Script de prueba ─────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -681,4 +812,67 @@ if __name__ == "__main__":
     print(f"  SelfAttention params == MultiHeadAttention params: {params_mha == params_attn}")
 
     print("\n[OK] MultiHeadAttention lista.")
+
+    # ── FeedForward ──────────────────────────────────────────────────────────
+    print("\n--- FeedForward ---")
+    FF_DIM = 4 * EMBED_DIM
+
+    ff = FeedForward(EMBED_DIM, dropout=0.0)
+    ff.eval()
+    salida_ff = ff(x_demo)
+
+    print(f"  Entrada shape  : {x_demo.shape}")
+    print(f"  Salida shape   : {salida_ff.shape}  (misma que la entrada)")
+    print(f"  Expansión interna: {EMBED_DIM} → {FF_DIM} → {EMBED_DIM}")
+
+    params_ff = sum(p.numel() for p in ff.parameters())
+    print(f"  Parámetros     : {params_ff:,}")
+    print(f"  ({EMBED_DIM}x{FF_DIM} + {FF_DIM}) + ({FF_DIM}x{EMBED_DIM} + {EMBED_DIM}) = {params_ff:,}")
+
+    # ── ResidualBlock con FeedForward ────────────────────────────────────────
+    print("\n--- ResidualBlock (LayerNorm + FeedForward + residual) ---")
+    ff2      = FeedForward(EMBED_DIM, dropout=0.0)
+    res_ff   = ResidualBlock(EMBED_DIM, ff2, dropout=0.0)
+    res_ff.eval()
+
+    salida_res = res_ff(x_demo)
+    print(f"  Entrada shape  : {x_demo.shape}")
+    print(f"  Salida shape   : {salida_res.shape}")
+
+    # Verificar que la conexión residual funciona:
+    # la salida NO es igual a la entrada (la subcapa añade algo)
+    # pero tampoco difiere en exceso (la residual estabiliza)
+    diff = (salida_res - x_demo).abs().mean().item()
+    print(f"  Diferencia media entrada/salida: {diff:.6f}  (> 0 confirma que FF transforma)")
+
+    # Verificar que LayerNorm normaliza correctamente
+    x_normed = res_ff.norm(x_demo)
+    print(f"  Media tras LayerNorm  : {x_normed.mean().item():.6f}  (debe ser ~0)")
+    print(f"  Std  tras LayerNorm   : {x_normed.std().item():.6f}   (debe ser ~1)")
+
+    # ── ResidualBlock con MultiHeadAttention ────────────────────────────────
+    print("\n--- ResidualBlock (LayerNorm + MultiHeadAttention + residual) ---")
+    mha2    = MultiHeadAttention(EMBED_DIM, NUM_HEADS, dropout=0.0)
+    res_mha = ResidualBlock(EMBED_DIM, mha2, dropout=0.0)
+    res_mha.eval()
+
+    salida_res_mha = res_mha(x_demo, mask=mask_demo2)
+    print(f"  Entrada shape  : {x_demo.shape}")
+    print(f"  Salida shape   : {salida_res_mha.shape}")
+    print(f"  Valores finitos: {torch.isfinite(salida_res_mha).all().item()}")
+
+    # ── Resumen de parámetros acumulados ────────────────────────────────────
+    print("\n--- Resumen de parámetros por bloque ---")
+    print(f"  InputEmbedding     : {sum(p.numel() for p in input_emb.parameters()):>8,}")
+    print(f"  MultiHeadAttention : {sum(p.numel() for p in mha2.parameters()):>8,}")
+    print(f"  FeedForward        : {sum(p.numel() for p in ff2.parameters()):>8,}")
+    print(f"  LayerNorm (x2)     : {sum(p.numel() for p in res_ff.norm.parameters()) * 2:>8,}  (2 params por dim × 2 norms)")
+    total = (sum(p.numel() for p in input_emb.parameters()) +
+             sum(p.numel() for p in mha2.parameters()) +
+             sum(p.numel() for p in ff2.parameters()) +
+             sum(p.numel() for p in res_ff.norm.parameters()) * 2)
+    print(f"  ─────────────────────────────")
+    print(f"  Total 1 bloque     : {total:>8,}  (sin contar la capa de salida)")
+
+    print("\n[OK] FeedForward + Residual + LayerNorm listos.")
     print("=" * 55)

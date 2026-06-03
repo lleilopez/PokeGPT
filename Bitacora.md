@@ -91,7 +91,7 @@ PokeGPT/
 | Sem 1 · Sáb | Implementar capa Embedding desde cero + positional encoding simple | [x] |
 | Sem 1 · Dom | Implementar bloque de atención: Q, K, V, scaled dot-product | [x] |
 | Sem 2 · Lun | Implementar Multi-Head Attention combinando varios bloques | [x] |
-| Sem 2 · Mar | Implementar Feed-Forward + residual connections + layer norm | [ ] |
+| Sem 2 · Mar | Implementar Feed-Forward + residual connections + layer norm | [x] |
 | Sem 2 · Mié | Ensamblar Transformer Decoder básico (1-2 capas) | [ ] |
 | Sem 2 · Jue | Implementar bucle de entrenamiento: forward, loss, backward | [ ] |
 | Sem 2 · Vie | Primer entrenamiento: verificar que la loss baja | [ ] |
