@@ -93,7 +93,7 @@ PokeGPT/
 | Sem 2 · Lun | Implementar Multi-Head Attention combinando varios bloques | [x] |
 | Sem 2 · Mar | Implementar Feed-Forward + residual connections + layer norm | [x] |
 | Sem 2 · Mié | Ensamblar Transformer Decoder básico (1-2 capas) | [x] |
-| Sem 2 · Jue | Implementar bucle de entrenamiento: forward, loss, backward | [ ] |
+| Sem 2 · Jue | Implementar bucle de entrenamiento: forward, loss, backward | [x] |
 | Sem 2 · Vie | Primer entrenamiento: verificar que la loss baja | [ ] |
 | Sem 2 · Sáb | Ajustar hiperparámetros: learning rate, batch size, longitud de secuencia | [ ] |
 | Sem 2 · Dom | Implementar generación de texto (greedy decoding) | [ ] |
@@ -297,7 +297,7 @@ PokeGPT/
 | `src/tokenizer.py` | Tokenizador por caracteres. Construye vocab desde el corpus, encode/decode texto↔índices, guarda/carga vocab en JSON. Clase: `CharTokenizer`. |
 | `src/dataset.py` | Dataset y DataLoader. Carga el corpus como LongTensor 1D, genera pares `(input, target)` con ventana deslizante de `context_length` tokens. Split 90/10 cronológico. Clases: `PokeDataset`, `crear_dataloaders`. |
 | `src/model.py` | Transformer Decoder completo. Clases: `TokenEmbedding`, `PositionalEncoding`, `InputEmbedding`, `SelfAttention`, `MultiHeadAttention`, `FeedForward`, `ResidualBlock`, `DecoderBlock`, `PokeGPTModel`. Entrada `(batch, seq_len)` → logits `(batch, seq_len, vocab_size)`. **418,560 parámetros totales** (2 capas, embed=128, heads=4). |
-| `src/train.py` | *(pendiente V0.1)* Bucle de entrenamiento: forward pass, cálculo de loss, backpropagation, guardado de checkpoints. |
+| `src/train.py` | Bucle de entrenamiento completo. AdamW + CrossEntropyLoss + gradient clipping. Guarda `best_model.pt` en `checkpoints/` y `loss_history.json` en `logs/`. Verificado en GPU (RTX 3050): ~148s/época, loss 4.52→0.69 en 2 épocas. |
 | `src/generate.py` | *(pendiente V0.1)* Generación de texto: greedy decoding y sampling con temperatura. |
 
 ---
