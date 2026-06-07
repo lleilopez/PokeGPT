@@ -94,8 +94,8 @@ PokeGPT/
 | Sem 2 · Mar | Implementar Feed-Forward + residual connections + layer norm | [x] |
 | Sem 2 · Mié | Ensamblar Transformer Decoder básico (1-2 capas) | [x] |
 | Sem 2 · Jue | Implementar bucle de entrenamiento: forward, loss, backward | [x] |
-| Sem 2 · Vie | Primer entrenamiento: verificar que la loss baja | [ ] |
-| Sem 2 · Sáb | Ajustar hiperparámetros: learning rate, batch size, longitud de secuencia | [ ] |
+| Sem 2 · Vie | Primer entrenamiento: verificar que la loss baja | [x] |
+| Sem 2 · Sáb | Ajustar hiperparámetros: learning rate, batch size, longitud de secuencia | [x] |
 | Sem 2 · Dom | Implementar generación de texto (greedy decoding) | [ ] |
 | Sem 3 · Lun | Entrenar modelo completo y evaluar primeras salidas | [ ] |
 | Sem 3 · Mar | Corregir problemas evidentes, revisar loss curves | [ ] |
