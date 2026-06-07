@@ -6,7 +6,7 @@ Este archivo se construye de forma incremental a lo largo de la Semana 1-2:
     Dom  — SelfAttention (Q, K, V, scaled dot-product) [HECHO]
     Lun  — MultiHeadAttention                              [HECHO]
     Mar  — FeedForward + residual + LayerNorm              [HECHO]
-    Mié  — DecoderBlock + PokeGPTModel completo
+    Mié  — DecoderBlock + PokeGPTModel completo            [HECHO]
 
 ¿Por qué necesitamos Embedding + Positional Encoding?
     El modelo recibe tensores de índices enteros: [21, 66, 57, ...].
@@ -659,6 +659,183 @@ class ResidualBlock(nn.Module):
         return x + self.dropout(out)
 
 
+# ─── 9. DECODER BLOCK ────────────────────────────────────────────────────────
+
+class DecoderBlock(nn.Module):
+    """
+    Un bloque completo del Transformer Decoder.
+
+    Combina exactamente los dos sub-bloques que hemos construido esta semana,
+    cada uno envuelto en su conexión residual y layer norm:
+
+        x → [LayerNorm + MultiHeadAttention + Residual]
+          → [LayerNorm + FeedForward        + Residual]
+          → x'
+
+    El modelo apilará NUM_LAYERS de estos bloques. Con 2 capas:
+        InputEmbedding → DecoderBlock_0 → DecoderBlock_1 → cabeza de salida
+
+    Cada bloque ve la secuencia completa (hasta la posición actual) y la
+    va refinando. Las primeras capas tienden a capturar patrones locales
+    (caracteres adyacentes), las últimas capturan patrones más globales
+    (estructura de una entrada de Pokédex).
+
+    Args:
+        embed_dim:  dimensión de los embeddings.
+        num_heads:  número de cabezas de atención.
+        dropout:    dropout aplicado en atención y feed-forward.
+    """
+
+    def __init__(self, embed_dim: int, num_heads: int, dropout: float = 0.1):
+        super().__init__()
+
+        # Sub-bloque 1: atención multi-cabeza con residual y norm
+        self.attn_block = ResidualBlock(
+            embed_dim,
+            MultiHeadAttention(embed_dim, num_heads, dropout),
+            dropout,
+        )
+        # Sub-bloque 2: feed-forward con residual y norm
+        self.ff_block = ResidualBlock(
+            embed_dim,
+            FeedForward(embed_dim, dropout=dropout),
+            dropout,
+        )
+
+    def forward(self, x: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
+        """
+        Args:
+            x:    (batch, seq_len, embed_dim)
+            mask: máscara causal (1, 1, seq_len, seq_len)
+
+        Returns:
+            (batch, seq_len, embed_dim)
+        """
+        x = self.attn_block(x, mask=mask)   # atención + residual
+        x = self.ff_block(x)                # feed-forward + residual
+        return x
+
+
+# ─── 10. POKEGPT MODEL ────────────────────────────────────────────────────────
+
+class PokeGPTModel(nn.Module):
+    """
+    Modelo completo de PokeGPT: Transformer Decoder autoregresivo.
+
+    Arquitectura completa:
+        [InputEmbedding]                     — índices → vectores con posición
+        [DecoderBlock] × num_layers          — refina los vectores capa a capa
+        [LayerNorm final]                    — normalización antes de la salida
+        [Linear: embed_dim → vocab_size]     — proyecta a logits por token
+
+    La salida son "logits": un vector de vocab_size valores por cada posición.
+    El valor más alto indica el token más probable en esa posición.
+    Durante el entrenamiento los logits se pasan a CrossEntropyLoss.
+    Durante la generación se muestrea de la distribución softmax de los logits.
+
+    Args:
+        vocab_size:      número de tokens del vocabulario (89).
+        embed_dim:       dimensión de los embeddings (128).
+        num_heads:       cabezas de atención por bloque (4).
+        num_layers:      número de DecoderBlocks apilados (2 para V0.1).
+        context_length:  longitud máxima de secuencia (128).
+        dropout:         dropout global del modelo (0.1).
+    """
+
+    def __init__(
+        self,
+        vocab_size:      int,
+        embed_dim:       int,
+        num_heads:       int,
+        num_layers:      int,
+        context_length:  int,
+        dropout:         float = 0.1,
+    ):
+        super().__init__()
+
+        self.context_length = context_length
+
+        # Entrada: convierte índices en vectores con información posicional
+        self.embedding = InputEmbedding(vocab_size, embed_dim, context_length, dropout)
+
+        # Núcleo: N bloques decoder apilados
+        # nn.ModuleList registra todos los bloques como parámetros del modelo
+        self.blocks = nn.ModuleList([
+            DecoderBlock(embed_dim, num_heads, dropout)
+            for _ in range(num_layers)
+        ])
+
+        # Normalización final antes de proyectar a logits
+        self.norm = nn.LayerNorm(embed_dim)
+
+        # Cabeza de salida: proyecta cada vector a logits sobre el vocabulario
+        # bias=False es estándar en LLMs modernos
+        self.head = nn.Linear(embed_dim, vocab_size, bias=False)
+
+        # Inicialización de pesos: pequeñas gaussianas para los lineales
+        # y ceros para los sesgos. Esto ayuda al entrenamiento a arrancar bien.
+        self._init_weights()
+
+    def _init_weights(self):
+        """
+        Inicializa los pesos del modelo con una distribución normal estrecha.
+
+        La inicialización importa: pesos demasiado grandes → activaciones que
+        explotan; demasiado pequeños → señal que se desvanece desde el inicio.
+        std=0.02 es la convención de GPT-2.
+        """
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.normal_(module.weight, mean=0.0, std=0.02)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.LayerNorm):
+                nn.init.ones_(module.weight)
+                nn.init.zeros_(module.bias)
+
+    def forward(
+        self,
+        indices: torch.Tensor,
+        mask:    torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """
+        Paso forward completo del modelo.
+
+        Args:
+            indices: (batch_size, seq_len) — índices de tokens enteros.
+            mask:    máscara causal opcional. Si es None se genera automáticamente.
+
+        Returns:
+            logits: (batch_size, seq_len, vocab_size)
+                    Para cada posición de la secuencia, la "puntuación" de cada
+                    token del vocabulario como siguiente token.
+        """
+        seq_len = indices.size(1)
+
+        # Generar máscara causal automáticamente si no se proporciona
+        if mask is None:
+            mask = crear_mascara_causal(seq_len, indices.device)
+
+        # 1. Convertir índices a vectores con posición
+        x = self.embedding(indices)                        # (batch, seq, embed)
+
+        # 2. Pasar por cada bloque decoder
+        for block in self.blocks:
+            x = block(x, mask=mask)                        # (batch, seq, embed)
+
+        # 3. Normalización final
+        x = self.norm(x)                                   # (batch, seq, embed)
+
+        # 4. Proyectar a logits sobre el vocabulario
+        logits = self.head(x)                              # (batch, seq, vocab_size)
+
+        return logits
+
+    def num_params(self) -> int:
+        """Devuelve el número total de parámetros aprendibles."""
+        return sum(p.numel() for p in self.parameters())
+
+
 # ─── Script de prueba ─────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -679,6 +856,12 @@ if __name__ == "__main__":
     CONTEXT_LENGTH = int(os.getenv("CONTEXT_LENGTH", 128))
     DROPOUT        = float(os.getenv("DROPOUT",      0.1))
     BATCH_SIZE     = 4   # pequeño para la demo
+
+    # Cargamos el tokenizador para decodificar tokens en las demos
+    DATA_DIR   = os.getenv("DATA_DIR", "data")
+    VOCAB_PATH = os.path.join(DATA_DIR, "processed", "vocab.json")
+    tokenizer  = CharTokenizer()
+    tokenizer.load(VOCAB_PATH)
 
     print("=" * 55)
     print("  Embedding + Positional Encoding — PokeGPT V0.1")
@@ -875,4 +1058,66 @@ if __name__ == "__main__":
     print(f"  Total 1 bloque     : {total:>8,}  (sin contar la capa de salida)")
 
     print("\n[OK] FeedForward + Residual + LayerNorm listos.")
+
+    # ── PokeGPTModel completo ────────────────────────────────────────────────
+    print("\n" + "=" * 55)
+    print("  PokeGPTModel — Modelo completo")
+    print("=" * 55)
+
+    NUM_LAYERS = int(os.getenv("NUM_LAYERS", 2))
+    DROPOUT    = float(os.getenv("DROPOUT",  0.1))
+
+    modelo = PokeGPTModel(
+        vocab_size     = VOCAB_SIZE,
+        embed_dim      = EMBED_DIM,
+        num_heads      = NUM_HEADS,
+        num_layers     = NUM_LAYERS,
+        context_length = CONTEXT_LENGTH,
+        dropout        = DROPOUT,
+    )
+    modelo.eval()
+
+    print(f"\nArquitectura:")
+    print(f"  vocab_size     : {VOCAB_SIZE}")
+    print(f"  embed_dim      : {EMBED_DIM}")
+    print(f"  num_heads      : {NUM_HEADS}  (d_head = {EMBED_DIM // NUM_HEADS})")
+    print(f"  num_layers     : {NUM_LAYERS}")
+    print(f"  context_length : {CONTEXT_LENGTH}")
+    print(f"  dropout        : {DROPOUT}")
+
+    # Desglose de parámetros por componente
+    emb_params   = sum(p.numel() for p in modelo.embedding.parameters())
+    block_params = sum(p.numel() for p in modelo.blocks.parameters())
+    head_params  = sum(p.numel() for p in modelo.head.parameters())
+    norm_params  = sum(p.numel() for p in modelo.norm.parameters())
+
+    print(f"\nParámetros por componente:")
+    print(f"  InputEmbedding          : {emb_params:>10,}")
+    print(f"  DecoderBlocks x{NUM_LAYERS}        : {block_params:>10,}  ({block_params // NUM_LAYERS:,} por bloque)")
+    print(f"  LayerNorm final         : {norm_params:>10,}")
+    print(f"  Cabeza de salida (head) : {head_params:>10,}")
+    print(f"  {'─' * 40}")
+    print(f"  TOTAL                   : {modelo.num_params():>10,}")
+
+    # Forward pass con un batch real
+    print(f"\nForward pass:")
+    with torch.no_grad():
+        logits = modelo(indices_demo)
+
+    print(f"  Entrada shape  : {indices_demo.shape}  (batch=4, seq=16)")
+    print(f"  Logits shape   : {logits.shape}  (batch=4, seq=16, vocab={VOCAB_SIZE})")
+    print(f"  Valores finitos: {torch.isfinite(logits).all().item()}")
+
+    # Simular predicción del siguiente token en la última posición
+    last_logits = logits[0, -1, :]          # logits del último token, secuencia 0
+    probs       = torch.softmax(last_logits, dim=-1)
+    top5_vals, top5_idx = torch.topk(probs, 5)
+
+    print(f"\nTop-5 tokens predichos para la posición final (pesos aleatorios):")
+    for idx_t, prob in zip(top5_idx.tolist(), top5_vals.tolist()):
+        token_repr = repr(tokenizer.idx2char.get(idx_t, "?"))
+        print(f"  token {idx_t:>3} ({token_repr:>6}) — prob: {prob:.4f}")
+    print(f"  (Con pesos aleatorios las probabilidades son casi uniformes ~{1/VOCAB_SIZE:.4f})")
+
+    print("\n[OK] PokeGPTModel ensamblado y listo para entrenar.")
     print("=" * 55)
